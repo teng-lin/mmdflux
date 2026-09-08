@@ -44,6 +44,11 @@ contributors do not need any extra socket setup.
 - The high-level runtime facade is `render_diagram`, `detect_diagram`,
   `validate_diagram`, plus the flat config/format/error types re-exported from
   `lib.rs`.
+- The additive prepared terminal facade (`prepare_text_diagram`,
+  `render_prepared_text`) retains immutable compiled payloads in `runtime::text`.
+  `graph::text_view` owns geometry-free semantic projection and provenance;
+  `render` owns bounded canvas emission and final cell-coordinate capture.
+  It does not alter the MMDS shared-coordinate `views` contract.
 - The supported low-level API is `builtins`, `registry`, `payload`, `graph`,
   `timeline`, `mmds`, `commands`, and `views` for adapter-oriented workflows
   that need explicit payload construction, graph IR inspection, MMDS command

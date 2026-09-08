@@ -208,7 +208,7 @@ fn merge_text_fg(
         return;
     };
 
-    for (offset, _) in text.chars().enumerate() {
+    for offset in 0..crate::format::display_width(text) {
         canvas.merge_style(start_x + offset, y, CellStyle::fg_rgb(r, g, b));
     }
 }

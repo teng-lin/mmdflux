@@ -18,24 +18,24 @@ pub(super) fn route_self_edge(
             match (x1 == x2, y1 == y2) {
                 (_, true) => vec![Segment::Horizontal {
                     y: y1,
-                    x_start: x1.min(x2),
-                    x_end: x1.max(x2),
+                    x_start: x1,
+                    x_end: x2,
                 }],
                 (true, _) => vec![Segment::Vertical {
                     x: x1,
-                    y_start: y1.min(y2),
-                    y_end: y1.max(y2),
+                    y_start: y1,
+                    y_end: y2,
                 }],
                 _ => vec![
                     Segment::Vertical {
                         x: x1,
-                        y_start: y1.min(y2),
-                        y_end: y1.max(y2),
+                        y_start: y1,
+                        y_end: y2,
                     },
                     Segment::Horizontal {
                         y: y2,
-                        x_start: x1.min(x2),
-                        x_end: x1.max(x2),
+                        x_start: x1,
+                        x_end: x2,
                     },
                 ],
             }

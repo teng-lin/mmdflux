@@ -65,3 +65,20 @@ impl From<&str> for RenderError {
         }
     }
 }
+
+/// Failures from the bounded prepared-text facade.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TextDiagramError {
+    #[error("text render cancelled")]
+    Cancelled,
+    #[error("parse error: {0}")]
+    Parse(String),
+    #[error("unsupported text operation: {0}")]
+    Unsupported(String),
+    #[error("invalid text request: {0}")]
+    InvalidRequest(String),
+    #[error("text resource limit: {0}")]
+    Limit(String),
+    #[error("text render failed: {0}")]
+    Render(String),
+}

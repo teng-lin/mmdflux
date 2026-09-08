@@ -86,6 +86,28 @@ pub struct SubgraphBounds {
     pub concurrent_regions: Vec<String>,
 }
 
+impl SubgraphBounds {
+    /// Exact protected title columns (exclusive end), excluding border fill.
+    pub fn title_span(&self) -> Option<(usize, usize)> {
+        use unicode_segmentation::UnicodeSegmentation;
+        if self.invisible || self.title.trim().is_empty() || self.width < 7 {
+            return None;
+        }
+        let inner = self.width - 2;
+        let max_width = inner - 4;
+        let mut width = 0;
+        for grapheme in self.title.graphemes(true) {
+            let next = crate::format::display_width(grapheme);
+            if width + next > max_width {
+                break;
+            }
+            width += next;
+        }
+        let start = self.x + 3 + inner.saturating_sub(width + 4) / 2;
+        Some((start, start + width))
+    }
+}
+
 /// Draw-coordinate data for a self-edge loop.
 #[derive(Debug, Clone)]
 pub struct SelfEdgeDrawData {

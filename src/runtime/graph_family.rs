@@ -141,12 +141,12 @@ pub(in crate::runtime) fn render_graph_family_mmds_with_provider_and_measurement
     )
 }
 
-struct GraphFamilyRenderResult {
-    solve: GraphSolveResult,
+pub(in crate::runtime) struct GraphFamilyRenderResult {
+    pub(in crate::runtime) solve: GraphSolveResult,
     text_metrics: ResolvedTextMetrics,
 }
 
-fn solve_graph_family_for_render(
+pub(in crate::runtime) fn solve_graph_family_for_render(
     diagram_id: &str,
     diagram: &mut Graph,
     format: OutputFormat,

@@ -15,6 +15,7 @@ pub(crate) mod graph_family;
 pub mod layout;
 pub(crate) mod mmds;
 mod payload;
+pub mod text;
 mod timeline_family;
 
 use config::RenderConfig;

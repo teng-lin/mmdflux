@@ -630,12 +630,16 @@ pub(super) fn repair_draw_path_segment_collisions(
         return repaired;
     }
 
-    let blockers: Vec<NodeBounds> = layout
+    let mut blockers: Vec<NodeBounds> = layout
         .node_bounds
         .iter()
         .filter(|(node_id, _)| *node_id != &edge.from && *node_id != &edge.to)
         .map(|(_, bounds)| *bounds)
         .collect();
+    // The first intersecting obstacle determines the detour. HashMap order is
+    // randomized, so use a total geometric order before making that choice.
+    // Equal keys have identical collision geometry and are interchangeable.
+    blockers.sort_by_key(|bounds| (bounds.y, bounds.x, bounds.height, bounds.width));
     if blockers.is_empty() {
         return repaired;
     }

@@ -22,7 +22,9 @@ pub(crate) use layout::SelfEdgeDrawData;
 pub use layout::{GridLayout, GridPos, NodeBounds, SubgraphBounds};
 #[cfg(test)]
 pub(crate) use routing::route_edge;
-pub use routing::{AttachDirection, Point, RoutedEdge, Segment, route_all_edges};
+pub use routing::{
+    AttachDirection, Point, RoutedEdge, Segment, repair_and_validate_routes, route_all_edges,
+};
 #[cfg(test)]
 pub(crate) use routing::{
     AttachmentOverride, TextPathFamily, compute_attachment_plan, route_edge_with_probe,
@@ -38,12 +40,47 @@ pub enum GridRanker {
     LongestPath,
 }
 
+/// Layout-unit spacing carried into terminal-cell projection.
+///
+/// Five layout units request one cell (rounded up). Existing label/port
+/// clearances remain lower bounds. Edge spacing still controls dummy-edge
+/// lanes in the solver; it is not a promise to separate shared edge trunks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridLayoutSpacing {
+    pub node_sep: f64,
+    pub rank_sep: f64,
+    pub edge_sep: f64,
+}
+
+impl GridLayoutSpacing {
+    pub fn apply(self, direction: crate::graph::Direction, config: &mut GridLayoutConfig) {
+        config.layout_spacing = Some(self);
+        // Keep the reference float-to-grid scale fixed. Using the requested
+        // separation as its denominator would normalize away the solver's
+        // spacing changes. Apply the request to actual cell-gap lower bounds.
+        let node_gap = (self.node_sep / 5.0).ceil() as usize;
+        let rank_gap = (self.rank_sep / 5.0).ceil() as usize;
+        let (horizontal, vertical) = match direction {
+            crate::graph::Direction::TopDown | crate::graph::Direction::BottomTop => {
+                (node_gap, rank_gap)
+            }
+            crate::graph::Direction::LeftRight | crate::graph::Direction::RightLeft => {
+                (rank_gap, node_gap)
+            }
+        };
+        config.h_spacing = config.h_spacing.max(horizontal);
+        config.v_spacing = config.v_spacing.max(vertical);
+    }
+}
+
 /// Configuration for derived grid layout computation.
 ///
 /// Controls integer-grid spacing, padding, and the underlying layout-derived
 /// parameters used by the grid replay pipeline.
 #[derive(Debug, Clone)]
 pub struct GridLayoutConfig {
+    /// Direction-independent terminal spacing, also applied to local sublayouts.
+    pub layout_spacing: Option<GridLayoutSpacing>,
     /// Horizontal spacing between nodes.
     pub h_spacing: usize,
     /// Vertical spacing between nodes.
@@ -68,11 +105,15 @@ pub struct GridLayoutConfig {
     pub cluster_rank_sep: f64,
     /// Honor hydrated projection ranks when replaying a marked materialized view.
     pub use_pinned_ranks: bool,
+    /// Reserve horizontal edge-label clearance at its endpoints instead of
+    /// applying the widest label as a global rank gap. Terminal opt-in only.
+    pub local_label_spacing: bool,
 }
 
 impl Default for GridLayoutConfig {
     fn default() -> Self {
         Self {
+            layout_spacing: None,
             h_spacing: 4,
             v_spacing: 3,
             padding: 1,
@@ -85,6 +126,7 @@ impl Default for GridLayoutConfig {
             margin: 8.0,
             cluster_rank_sep: 25.0,
             use_pinned_ranks: false,
+            local_label_spacing: false,
         }
     }
 }

@@ -29,7 +29,7 @@ use crate::graph::Graph;
 use crate::graph::geometry::RoutedGraphGeometry;
 use crate::graph::grid::{GridLayout, RoutedEdge, Segment, SubgraphBounds, route_all_edges};
 use crate::render::text::canvas::{Cell, Connections};
-use crate::render::text::{Canvas, CharSet};
+use crate::render::text::{Canvas, CharSet, TextRenderCapture, TextRenderLimits};
 
 /// Render text output from a derived grid layout.
 pub fn render_text_from_grid_layout(
@@ -47,36 +47,12 @@ pub fn render_text_from_grid_layout(
     let (canvas_width, canvas_height) = required_canvas_size(layout, &routed_edges);
     let mut canvas = Canvas::new(canvas_width, canvas_height);
 
-    if !layout.subgraph_bounds.is_empty() {
-        subgraph::render_subgraph_borders(&mut canvas, &layout.subgraph_bounds, &charset);
-    }
-
-    let mut node_keys: Vec<&String> = diagram.nodes.keys().collect();
-    node_keys.sort();
-    for node_id in node_keys {
-        let node = &diagram.nodes[node_id];
-        if let Some(&(x, y)) = layout.draw_positions.get(node_id) {
-            shape::render_node(&mut canvas, node, x, y, &charset, diagram.direction);
-        }
-    }
-
-    let edge_containment =
-        edge::compute_edge_containment(&diagram.edges, &diagram.subgraphs, &layout.subgraph_bounds);
-
-    edge::render_all_edges_with_labels(
-        &mut canvas,
-        &routed_edges,
-        &charset,
-        diagram.direction,
-        &edge_containment,
+    paint_canvas(
+        diagram,
         layout,
         routed,
-    );
-
-    apply_subgraph_border_junctions(
-        &mut canvas,
-        &layout.subgraph_bounds,
         &routed_edges,
+        &mut canvas,
         &charset,
     );
 
@@ -85,6 +61,159 @@ pub fn render_text_from_grid_layout(
     } else {
         canvas.to_string()
     }
+}
+
+pub fn render_text_capture_from_grid_layout(
+    diagram: &Graph,
+    layout: &GridLayout,
+    routed: Option<&RoutedGraphGeometry>,
+    options: &TextRenderOptions,
+    limits: &TextRenderLimits,
+) -> Result<TextRenderCapture, String> {
+    limits.check(layout.width, layout.height)?;
+    let charset = if options.output_format == OutputFormat::Ascii {
+        CharSet::ascii()
+    } else {
+        CharSet::unicode()
+    };
+    let mut routed_edges = route_all_edges(&diagram.edges, layout, diagram.direction);
+    let (width, height) = required_canvas_size(layout, &routed_edges);
+    limits.check(width, height)?;
+    let mut diagnostics = crate::graph::grid::repair_and_validate_routes(
+        &mut routed_edges,
+        &diagram.edges,
+        layout,
+        width,
+        height,
+    );
+    let (width, height) = required_canvas_size(layout, &routed_edges);
+    let mut canvas = Canvas::new_limited(width, height, *limits)?;
+    let mut node_bounds = paint_canvas(
+        diagram,
+        layout,
+        routed,
+        &routed_edges,
+        &mut canvas,
+        &charset,
+    );
+    canvas.check_limits()?;
+    if let Some(spacing) = options.layout_spacing
+        && layout.subgraph_bounds.is_empty()
+    {
+        let lane_gap = (spacing.edge_sep / 5.0).ceil() as usize;
+        if let Some((x_map, y_map)) = canvas.compact_corridors(
+            layout.h_spacing.max(lane_gap),
+            layout.v_spacing.max(lane_gap),
+        ) {
+            for bounds in node_bounds.values_mut() {
+                bounds.width = x_map[bounds.x + bounds.width] - x_map[bounds.x];
+                bounds.height = y_map[bounds.y + bounds.height] - y_map[bounds.y];
+                bounds.x = x_map[bounds.x];
+                bounds.y = y_map[bounds.y];
+                bounds.layout_center_x = bounds.layout_center_x.and_then(|x| x_map.get(x).copied());
+                bounds.layout_center_y = bounds.layout_center_y.and_then(|y| y_map.get(y).copied());
+            }
+            map_route_coordinates(&mut routed_edges, |x| x_map[x], |y| y_map[y]);
+        }
+    }
+    diagnostics.extend(canvas.emission_diagnostics());
+    let (text, origin, width, height) = canvas.serialize(false);
+    for bounds in node_bounds.values_mut() {
+        bounds.x = bounds.x.saturating_sub(origin.0);
+        bounds.y = bounds.y.saturating_sub(origin.1);
+        bounds.layout_center_x = bounds.layout_center_x.map(|x| x.saturating_sub(origin.0));
+        bounds.layout_center_y = bounds.layout_center_y.map(|y| y.saturating_sub(origin.1));
+    }
+    let mut subgraph_bounds = layout.subgraph_bounds.clone();
+    subgraph_bounds.retain(|_, bounds| !bounds.invisible);
+    for bounds in subgraph_bounds.values_mut() {
+        bounds.x = bounds.x.saturating_sub(origin.0);
+        bounds.y = bounds.y.saturating_sub(origin.1);
+    }
+    map_route_coordinates(
+        &mut routed_edges,
+        |x| x.saturating_sub(origin.0),
+        |y| y.saturating_sub(origin.1),
+    );
+    Ok(TextRenderCapture {
+        text,
+        origin,
+        width,
+        height,
+        node_bounds,
+        subgraph_bounds,
+        routed_edge_indices: routed_edges.iter().map(|route| route.edge.index).collect(),
+        routes: routed_edges,
+        diagnostics,
+    })
+}
+
+fn map_route_coordinates(
+    routes: &mut [RoutedEdge],
+    map_x: impl Fn(usize) -> usize,
+    map_y: impl Fn(usize) -> usize,
+) {
+    for route in routes {
+        route.start.x = map_x(route.start.x);
+        route.start.y = map_y(route.start.y);
+        route.end.x = map_x(route.end.x);
+        route.end.y = map_y(route.end.y);
+        for segment in &mut route.segments {
+            match segment {
+                Segment::Horizontal { y, x_start, x_end } => {
+                    *y = map_y(*y);
+                    *x_start = map_x(*x_start);
+                    *x_end = map_x(*x_end);
+                }
+                Segment::Vertical { x, y_start, y_end } => {
+                    *x = map_x(*x);
+                    *y_start = map_y(*y_start);
+                    *y_end = map_y(*y_end);
+                }
+            }
+        }
+    }
+}
+
+fn paint_canvas(
+    diagram: &Graph,
+    layout: &GridLayout,
+    routed: Option<&RoutedGraphGeometry>,
+    routed_edges: &[RoutedEdge],
+    canvas: &mut Canvas,
+    charset: &CharSet,
+) -> std::collections::HashMap<String, crate::graph::grid::NodeBounds> {
+    if !layout.subgraph_bounds.is_empty() {
+        subgraph::render_subgraph_borders(canvas, &layout.subgraph_bounds, charset);
+    }
+
+    let mut node_keys: Vec<&String> = diagram.nodes.keys().collect();
+    let mut node_bounds = std::collections::HashMap::new();
+    node_keys.sort();
+    for node_id in node_keys {
+        let node = &diagram.nodes[node_id];
+        if let Some(&(x, y)) = layout.draw_positions.get(node_id) {
+            let bounds = shape::render_node(canvas, node, x, y, charset, diagram.direction);
+            node_bounds.insert(node_id.clone(), bounds);
+        }
+    }
+
+    let edge_containment =
+        edge::compute_edge_containment(&diagram.edges, &diagram.subgraphs, &layout.subgraph_bounds);
+
+    edge::render_all_edges_with_labels(
+        canvas,
+        routed_edges,
+        charset,
+        diagram.direction,
+        &edge_containment,
+        layout,
+        routed,
+    );
+
+    apply_subgraph_border_junctions(canvas, &layout.subgraph_bounds, routed_edges, charset);
+
+    node_bounds
 }
 
 fn required_canvas_size(layout: &GridLayout, routed_edges: &[RoutedEdge]) -> (usize, usize) {
@@ -215,7 +344,15 @@ fn set_junction_cell(
     conns: Connections,
     charset: &CharSet,
 ) {
+    let preserve_content = canvas.is_bounded();
     if let Some(cell) = canvas.get_mut(x, y) {
+        // An edge crossing a cluster border may place its arrow on that very
+        // cell. The final border-junction pass must not erase the marker (or
+        // node/title text) that the bounded renderer has just audited.
+        if preserve_content && (cell.is_node || cell.is_subgraph_title || charset.is_arrow(cell.ch))
+        {
+            return;
+        }
         cell.ch = charset.junction(conns);
         cell.connections = conns;
         cell.is_edge = true;

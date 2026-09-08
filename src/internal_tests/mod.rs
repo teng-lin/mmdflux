@@ -17,6 +17,7 @@ mod port_attachment_observation;
 mod singleton_centering_observation;
 pub(crate) mod stub_metrics;
 mod svg_render_pipeline;
+mod terminal_capture;
 mod text_render_pipeline;
 
 mod direction_policy_cross;

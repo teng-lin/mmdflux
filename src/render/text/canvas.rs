@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use super::TextRenderLimits;
 use super::chars::CharSet;
 pub use super::connections::Connections;
 use crate::format::char_display_width;
@@ -46,12 +50,17 @@ impl CellStyle {
 pub struct Cell {
     /// The character displayed in this cell.
     pub ch: char,
+    /// Complete multi-scalar grapheme; single-scalar drawing retains `ch`.
+    pub grapheme: Option<Box<str>>,
     /// Optional style metadata emitted only during final serialization.
     pub style: Option<CellStyle>,
     /// Connection metadata for junction resolution.
     pub connections: Connections,
     /// Whether this cell is part of a node (protected from edge overwrite).
     pub is_node: bool,
+    /// Text footprint, including spaces inside labels. Never shorten this
+    /// footprint when compacting straight connector corridors.
+    pub is_text: bool,
     /// Whether this cell is part of an edge path (protected from label overwrite).
     pub is_edge: bool,
     /// Whether this cell is part of a subgraph border (NOT protected from overwrite).
@@ -81,6 +90,10 @@ pub struct Canvas {
     cells: Vec<Vec<Cell>>,
     width: usize,
     height: usize,
+    limits: Option<TextRenderLimits>,
+    limit_error: Option<String>,
+    expected_text: Vec<(usize, usize, Box<str>)>,
+    suppressed_text: usize,
 }
 
 impl Canvas {
@@ -93,6 +106,78 @@ impl Canvas {
             cells,
             width,
             height,
+            limits: None,
+            limit_error: None,
+            expected_text: Vec::new(),
+            suppressed_text: 0,
+        }
+    }
+
+    /// Allocate only after checked dimension/area validation.
+    pub fn new_limited(
+        width: usize,
+        height: usize,
+        limits: TextRenderLimits,
+    ) -> Result<Self, String> {
+        limits.check(width, height)?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(height)
+            .map_err(|e| format!("cannot allocate text rows: {e}"))?;
+        for _ in 0..height {
+            let mut row = Vec::new();
+            row.try_reserve_exact(width)
+                .map_err(|e| format!("cannot allocate text cells: {e}"))?;
+            row.resize_with(width, Cell::empty);
+            cells.push(row);
+        }
+        Ok(Self {
+            cells,
+            width,
+            height,
+            limits: Some(limits),
+            limit_error: None,
+            expected_text: Vec::new(),
+            suppressed_text: 0,
+        })
+    }
+
+    pub fn check_limits(&self) -> Result<(), String> {
+        self.limit_error.clone().map_or(Ok(()), Err)
+    }
+
+    pub fn is_bounded(&self) -> bool {
+        self.limits.is_some()
+    }
+
+    pub fn note_suppressed_text(&mut self) {
+        if self.limits.is_some() {
+            self.suppressed_text = self.suppressed_text.saturating_add(1);
+        }
+    }
+
+    pub fn expect_text(&mut self, x: usize, y: usize, text: &str) {
+        if self.limits.is_some() && !text.trim().is_empty() {
+            self.expected_text.push((x, y, text.into()));
+        }
+    }
+
+    pub fn emission_diagnostics(&self) -> Vec<String> {
+        let overwritten = self.expected_text.iter().filter(|(x, y, expected)| {
+            let lost = self.get(*x, *y).is_none_or(|cell| {
+                if let Some(grapheme) = &cell.grapheme { grapheme != expected }
+                else { let mut chars = expected.chars(); chars.next() != Some(cell.ch) || chars.next().is_some() }
+            });
+            if lost { tracing::debug!(x, y, ?expected, actual = ?self.get(*x, *y).map(|cell| cell.ch), "text glyph overwritten during emission"); }
+            lost
+        }).count();
+        let lost = overwritten.saturating_add(self.suppressed_text);
+        if lost == 0 {
+            Vec::new()
+        } else {
+            vec![format!(
+                "at least {lost} label/marker graphemes could not be emitted intact; inspect source or a focused view"
+            )]
         }
     }
 
@@ -111,6 +196,19 @@ impl Canvas {
     /// New cells are initialized to empty (space) characters.
     pub fn expand_width(&mut self, new_width: usize) {
         if new_width > self.width {
+            if let Some(limits) = self.limits {
+                if let Err(error) = limits.check(new_width, self.height) {
+                    self.limit_error.get_or_insert(error);
+                    return;
+                }
+                for row in &mut self.cells {
+                    if let Err(error) = row.try_reserve_exact(new_width.saturating_sub(row.len())) {
+                        self.limit_error
+                            .get_or_insert_with(|| format!("cannot grow text canvas: {error}"));
+                        return;
+                    }
+                }
+            }
             for row in &mut self.cells {
                 row.resize(new_width, Cell::empty());
             }
@@ -140,6 +238,9 @@ impl Canvas {
     /// `(x + 1, y)` is automatically marked as a continuation so the
     /// renderer does not double-emit the trailing column.
     pub fn set(&mut self, x: usize, y: usize, ch: char) -> bool {
+        if char_display_width(ch) == 2 && x.checked_add(2).is_none_or(|end| end > self.width) {
+            return false;
+        }
         let was_continuation;
         if let Some(cell) = self.get_mut(x, y) {
             if cell.is_subgraph_title {
@@ -147,7 +248,9 @@ impl Canvas {
             }
             was_continuation = cell.is_continuation;
             cell.ch = ch;
+            cell.grapheme = None;
             cell.is_continuation = false;
+            cell.is_text = false;
         } else {
             return false;
         }
@@ -160,6 +263,7 @@ impl Canvas {
             && !cont.is_subgraph_title
         {
             cont.ch = ' ';
+            cont.grapheme = None;
             cont.is_continuation = true;
         }
         true
@@ -173,9 +277,14 @@ impl Canvas {
             return;
         }
         if let Some(owner) = self.get_mut(x - 1, y)
-            && char_display_width(owner.ch) == 2
+            && owner
+                .grapheme
+                .as_deref()
+                .map_or_else(|| char_display_width(owner.ch), UnicodeWidthStr::width)
+                == 2
         {
             owner.ch = ' ';
+            owner.grapheme = None;
         }
     }
 
@@ -187,6 +296,7 @@ impl Canvas {
         {
             neighbor.is_continuation = false;
             neighbor.ch = ' ';
+            neighbor.grapheme = None;
         }
     }
 
@@ -279,6 +389,7 @@ impl Canvas {
                 charset.junction(merged)
             };
             cell.is_edge = true;
+            cell.grapheme = None;
             was_continuation = cell.is_continuation;
             cell.is_continuation = false;
         } else {
@@ -305,9 +416,13 @@ impl Canvas {
     ///
     /// Border cells are NOT protected from overwrite by nodes or edges.
     pub fn set_subgraph_border(&mut self, x: usize, y: usize, ch: char) -> bool {
+        if self.is_bounded() && self.get(x, y).is_some_and(|cell| cell.is_subgraph_title) {
+            return false;
+        }
         let was_continuation;
         if let Some(cell) = self.get_mut(x, y) {
             cell.ch = ch;
+            cell.grapheme = None;
             cell.is_subgraph_border = true;
             was_continuation = cell.is_continuation;
             cell.is_continuation = false;
@@ -342,27 +457,156 @@ impl Canvas {
     /// Characters that fall outside the canvas are ignored.
     pub fn write_str(&mut self, x: usize, y: usize, s: &str) {
         let mut advance = 0usize;
-        for ch in s.chars() {
-            self.set(x + advance, y, ch);
-            advance += char_display_width(ch);
+        for grapheme in s.graphemes(true) {
+            // Never serialize terminal controls supplied by a label. Normal
+            // combining and joiner sequences remain one indivisible glyph.
+            if grapheme.chars().any(char::is_control) {
+                self.note_suppressed_text();
+                continue;
+            }
+            let width = UnicodeWidthStr::width(grapheme);
+            if width == 0 {
+                self.note_suppressed_text();
+                continue;
+            }
+            let Some(cell_x) = x.checked_add(advance) else {
+                break;
+            };
+            self.expect_text(cell_x, y, grapheme);
+            if cell_x.checked_add(width).is_none_or(|end| end > self.width) {
+                break;
+            }
+            let first = grapheme.chars().next().unwrap();
+            // Text-presentation selectors can make a normally-wide scalar a
+            // one-cell grapheme; reserve by the complete glyph's width.
+            let initial = if width == 1 && char_display_width(first) == 2 {
+                ' '
+            } else {
+                first
+            };
+            if self.set(cell_x, y, initial) {
+                self.get_mut(cell_x, y).unwrap().ch = first;
+                self.get_mut(cell_x, y).unwrap().is_text = true;
+                if grapheme.len() > first.len_utf8() {
+                    self.get_mut(cell_x, y).unwrap().grapheme = Some(grapheme.into());
+                }
+                // A ZWJ/variation-selector grapheme's width can differ from
+                // its first scalar; continuation follows the whole grapheme.
+                if width == 2 {
+                    if let Some(cell) = self.get_mut(cell_x + 1, y) {
+                        cell.ch = ' ';
+                        cell.grapheme = None;
+                        cell.is_continuation = true;
+                        cell.is_text = true;
+                    }
+                } else {
+                    self.clear_dangling_continuation(cell_x, y);
+                }
+            }
+            advance += width;
         }
+    }
+
+    /// Shorten only bands made entirely of blank cells and straight connectors
+    /// crossing the band. Nodes, text (including spaces), corners, junctions,
+    /// arrows, and wide graphemes are immovable. This is an order-preserving
+    /// deletion of redundant cells, not scaling or re-wrapping diagram text.
+    /// Maps include the exclusive end coordinate for rectangle projection.
+    pub(crate) fn compact_corridors(
+        &mut self,
+        horizontal_gap: usize,
+        vertical_gap: usize,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        let mut columns = vec![true; self.width];
+        let mut rows = vec![true; self.height];
+        for (y, row) in self.cells.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                let free = !cell.is_node
+                    && !cell.is_text
+                    && !cell.is_subgraph_border
+                    && !cell.is_subgraph_title
+                    && !cell.is_continuation
+                    && cell.grapheme.is_none();
+                columns[x] &= free
+                    && (cell.ch == ' '
+                        || (cell.is_edge
+                            && matches!(cell.ch, '─' | '━' | '┄' | '┅' | '┈' | '┉' | '-' | '═')));
+                rows[y] &= free
+                    && (cell.ch == ' '
+                        || (cell.is_edge
+                            && matches!(cell.ch, '│' | '┃' | '┆' | '┇' | '┊' | '┋' | '|' | '║')));
+            }
+        }
+        fn mapping(removable: &[bool], gap: usize) -> (Vec<usize>, Vec<bool>) {
+            let mut map = Vec::with_capacity(removable.len() + 1);
+            let mut keep = Vec::with_capacity(removable.len());
+            let mut run = 0;
+            let mut position = 0;
+            for &free in removable {
+                run = if free { run + 1 } else { 0 };
+                let retained = !free || run <= gap.max(1);
+                map.push(position);
+                keep.push(retained);
+                position += usize::from(retained);
+            }
+            map.push(position);
+            (map, keep)
+        }
+        let (x_map, keep_x) = mapping(&columns, horizontal_gap);
+        let (y_map, keep_y) = mapping(&rows, vertical_gap);
+        if x_map[self.width] == self.width && y_map[self.height] == self.height {
+            return None;
+        }
+        // Retain in place: no second full-size canvas allocation.
+        for row in &mut self.cells {
+            let mut x = 0;
+            row.retain(|_| {
+                let keep = keep_x[x];
+                x += 1;
+                keep
+            });
+        }
+        let mut y = 0;
+        self.cells.retain(|_| {
+            let keep = keep_y[y];
+            y += 1;
+            keep
+        });
+        self.width = x_map[self.width];
+        self.height = y_map[self.height];
+        for (x, y, _) in &mut self.expected_text {
+            // Out-of-bounds expectations must stay failures after compaction.
+            *x = x_map.get(*x).copied().unwrap_or(self.width);
+            *y = y_map.get(*y).copied().unwrap_or(self.height);
+        }
+        Some((x_map, y_map))
     }
 
     /// Convert the canvas to a string with ANSI escapes emitted from cell styles.
     ///
     /// Visible text matches `Canvas::to_string()` after escape stripping.
     pub fn to_ansi_string(&self) -> String {
+        self.serialize(true).0
+    }
+
+    /// Serialize using one crop computation for plain text, ANSI and metadata.
+    /// Returns (text, original top-left cell, emitted width, emitted height).
+    pub fn serialize(&self, ansi: bool) -> (String, (usize, usize), usize, usize) {
         let row_ends: Vec<usize> = self
             .cells
             .iter()
             .map(|row| {
                 row.iter()
-                    .rposition(|cell| cell.ch != ' ')
+                    .rposition(|cell| {
+                        cell.ch != ' ' || cell.is_continuation || cell.grapheme.is_some()
+                    })
                     .map_or(0, |idx| idx + 1)
             })
             .collect();
 
-        let first_non_empty = row_ends.iter().position(|&end| end > 0).unwrap_or(0);
+        let Some(first_non_empty) = row_ends.iter().position(|&end| end > 0) else {
+            return (String::new(), (0, 0), 0, 0);
+        };
         let last_non_empty = row_ends
             .iter()
             .rposition(|&end| end > 0)
@@ -377,7 +621,11 @@ impl Canvas {
                 }
 
                 let row = &self.cells[first_non_empty + offset][..end];
-                Some(row.iter().take_while(|cell| cell.ch == ' ').count())
+                Some(
+                    row.iter()
+                        .take_while(|cell| cell.ch == ' ' && cell.grapheme.is_none())
+                        .count(),
+                )
             })
             .min()
             .unwrap_or(0);
@@ -394,11 +642,15 @@ impl Canvas {
                 if cell.is_continuation {
                     continue;
                 }
-                if cell.style != active_style {
+                if ansi && cell.style != active_style {
                     push_sgr_transition(&mut output, active_style, cell.style);
                     active_style = cell.style;
                 }
-                output.push(cell.ch);
+                if let Some(grapheme) = &cell.grapheme {
+                    output.push_str(grapheme);
+                } else {
+                    output.push(cell.ch);
+                }
             }
 
             if active_style.is_some() {
@@ -410,7 +662,13 @@ impl Canvas {
             }
         }
 
-        output
+        let width = ends
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(min_indent);
+        (output, (min_indent, first_non_empty), width, rows.len())
     }
 }
 
@@ -469,59 +727,149 @@ impl fmt::Display for Canvas {
     /// Trailing spaces on each line are trimmed, and common leading whitespace
     /// is stripped from all lines so the diagram is left-aligned.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lines: Vec<String> = self
-            .cells
-            .iter()
-            .map(|row| {
-                let line: String = row
-                    .iter()
-                    .filter(|cell| !cell.is_continuation)
-                    .map(|cell| cell.ch)
-                    .collect();
-                line.trim_end().to_string()
-            })
-            .collect();
-
-        // Trim leading and trailing empty rows
-        let first_non_empty = lines.iter().position(|line| !line.is_empty()).unwrap_or(0);
-        let last_non_empty = lines
-            .iter()
-            .rposition(|line| !line.is_empty())
-            .unwrap_or(lines.len().saturating_sub(1));
-        let lines = &lines[first_non_empty..=last_non_empty];
-
-        // Find the minimum leading whitespace across all non-empty lines
-        let min_indent = lines
-            .iter()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.len() - line.trim_start().len())
-            .min()
-            .unwrap_or(0);
-
-        if min_indent == 0 {
-            return write!(f, "{}", lines.join("\n"));
-        }
-
-        // Strip common leading whitespace
-        let result: String = lines
-            .iter()
-            .map(|line| {
-                if line.len() > min_indent {
-                    &line[min_indent..]
-                } else {
-                    line.as_str()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        write!(f, "{}", result)
+        f.write_str(&self.serialize(false).0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corridor_compaction_preserves_text_spaces_wide_glyphs_and_audits() {
+        let mut canvas = Canvas::new_limited(
+            100,
+            30,
+            TextRenderLimits {
+                max_width: 100,
+                max_height: 30,
+                max_cells: 3000,
+            },
+        )
+        .unwrap();
+        canvas.write_str(1, 1, "A     B");
+        for x in 8..80 {
+            canvas.set(x, 1, '─');
+            canvas.get_mut(x, 1).unwrap().is_edge = true;
+        }
+        canvas.write_str(80, 1, "e\u{301}界👩‍💻");
+        canvas.write_str(1, 20, "---"); // Label punctuation is not a connector.
+        let (x, y) = canvas.compact_corridors(4, 3).unwrap();
+        assert_eq!(x[80] - x[8], 4);
+        assert_eq!(y[20] - y[1], 4);
+        let output = canvas.to_string();
+        assert!(output.contains("A     B────e\u{301}界👩‍💻"), "{output}");
+        assert!(output.contains("---"));
+        assert!(canvas.emission_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn corridor_compaction_keeps_node_rectangles_arrows_and_junctions() {
+        let mut canvas = Canvas::new(70, 30);
+        for x in 0..70 {
+            canvas.set(x, 10, '─');
+            canvas.get_mut(x, 10).unwrap().is_edge = true;
+        }
+        for y in 0..30 {
+            canvas.set(45, y, '│');
+            canvas.get_mut(45, y).unwrap().is_edge = true;
+        }
+        canvas.set(45, 10, '┼');
+        canvas.set(60, 10, '►');
+        for y in 2..8 {
+            for x in 3..13 {
+                canvas.mark_as_node(x, y);
+            }
+        }
+        let (x, y) = canvas.compact_corridors(4, 3).unwrap();
+        assert_eq!(x[13] - x[3], 10);
+        assert_eq!(y[8] - y[2], 6);
+        assert_eq!(canvas.get(x[45], y[10]).unwrap().ch, '┼');
+        assert_eq!(canvas.get(x[60], y[10]).unwrap().ch, '►');
+        assert!(x[60] - x[45] >= 5);
+    }
+
+    #[test]
+    fn complete_graphemes_share_terminal_cells_and_capture_origin() {
+        let mut canvas = Canvas::new(24, 7);
+        let label = "e\u{301}中👩\u{200d}💻!";
+        canvas.write_str(4, 3, label);
+        let (plain, origin, width, height) = canvas.serialize(false);
+        assert_eq!(plain, label);
+        assert_eq!(origin, (4, 3));
+        assert_eq!((width, height), (6, 1));
+        assert_eq!(UnicodeWidthStr::width(plain.as_str()), width);
+        assert_eq!(canvas.get(5, 3).unwrap().ch, '中');
+        assert!(canvas.get(6, 3).unwrap().is_continuation);
+        assert!(canvas.get(8, 3).unwrap().is_continuation);
+        assert_eq!(canvas.get(9, 3).unwrap().ch, '!');
+        canvas.set_style(4, 3, CellStyle::fg_rgb(12, 34, 56));
+        assert_eq!(strip_ansi(&canvas.to_ansi_string()), plain);
+    }
+
+    #[test]
+    fn grapheme_continuation_overwrite_clears_whole_owner() {
+        let mut canvas = Canvas::new(8, 1);
+        canvas.write_str(0, 0, "A👩\u{200d}💻B");
+        canvas.set(2, 0, 'X');
+        assert_eq!(canvas.to_string(), "A XB");
+        assert!(canvas.get(1, 0).unwrap().grapheme.is_none());
+    }
+
+    #[test]
+    fn canvas_empty_serialization_is_safe() {
+        assert_eq!(
+            Canvas::new(0, 0).serialize(false),
+            (String::new(), (0, 0), 0, 0)
+        );
+        assert_eq!(Canvas::new(0, 3).to_ansi_string(), "");
+    }
+
+    #[test]
+    fn space_based_combining_grapheme_is_not_trimmed_as_padding() {
+        let mut canvas = Canvas::new(8, 3);
+        canvas.write_str(3, 1, " \u{301}");
+        assert_eq!(canvas.serialize(false), (" \u{301}".into(), (3, 1), 1, 1));
+        assert_eq!(canvas.to_ansi_string(), " \u{301}");
+    }
+
+    #[test]
+    fn wide_glyph_cannot_extend_beyond_last_canvas_cell() {
+        let mut canvas = Canvas::new(2, 1);
+        assert!(!canvas.set(1, 0, '中'));
+        assert_eq!(canvas.to_string(), "");
+        assert!(canvas.set(0, 0, '中'));
+        assert_eq!(canvas.serialize(false).2, 2);
+    }
+
+    #[test]
+    fn presentation_selectors_fit_the_whole_grapheme_width() {
+        for label in ["⌚\u{fe0e}", "☺\u{fe0f}", "❤\u{fe0f}", "👩\u{200d}💻"] {
+            let width = UnicodeWidthStr::width(label);
+            let mut canvas = Canvas::new(width, 1);
+            canvas.write_str(0, 0, label);
+            assert_eq!(canvas.to_string(), label);
+            assert_eq!(canvas.serialize(false).2, width);
+        }
+    }
+
+    #[test]
+    fn canvas_limits_precede_initial_and_late_allocation() {
+        let limits = TextRenderLimits {
+            max_width: 20,
+            max_height: 10,
+            max_cells: 100,
+        };
+        assert!(Canvas::new_limited(usize::MAX, 2, limits).is_err());
+        assert!(Canvas::new_limited(20, 10, limits).is_err());
+        let mut canvas = Canvas::new_limited(5, 10, limits).unwrap();
+        canvas.expand_width(10);
+        assert_eq!(canvas.width(), 10);
+        assert!(canvas.check_limits().is_ok());
+        canvas.expand_width(11);
+        assert_eq!(canvas.width(), 10);
+        assert!(canvas.check_limits().unwrap_err().contains("cell limit"));
+    }
 
     fn strip_ansi(input: &str) -> String {
         let mut stripped = String::with_capacity(input.len());

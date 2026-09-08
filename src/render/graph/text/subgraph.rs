@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use crate::format::{char_display_width, display_width};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::format::display_width;
 use crate::graph::grid::SubgraphBounds;
 use crate::render::text::canvas::Canvas;
 use crate::render::text::chars::CharSet;
@@ -14,12 +16,12 @@ use crate::render::text::chars::CharSet;
 fn truncate_to_display_width(s: &str, max_width: usize) -> String {
     let mut out = String::new();
     let mut width = 0usize;
-    for ch in s.chars() {
-        let w = char_display_width(ch);
+    for grapheme in s.graphemes(true) {
+        let w = display_width(grapheme);
         if width + w > max_width {
             break;
         }
-        out.push(ch);
+        out.push_str(grapheme);
         width += w;
     }
     out
@@ -36,10 +38,15 @@ pub fn render_subgraph_borders(
     charset: &CharSet,
 ) {
     // Sort by depth: outer borders first (background), inner last (foreground)
-    let mut sorted_bounds: Vec<_> = subgraph_bounds.values().collect();
-    sorted_bounds.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.title.cmp(&b.title)));
+    let mut sorted_bounds: Vec<_> = subgraph_bounds.iter().collect();
+    sorted_bounds.sort_by(|(a_id, a), (b_id, b)| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a_id.cmp(b_id))
+    });
 
-    for bounds in sorted_bounds {
+    for (_, bounds) in sorted_bounds {
         // Invisible subgraphs participate in layout but render no border.
         if bounds.invisible {
             continue;
@@ -91,11 +98,13 @@ pub fn render_subgraph_borders(
                 canvas.set_subgraph_border(dx, y, charset.horizontal);
             }
 
-            // Protect the entire top border row so edges cannot corrupt the
-            // embedded title segment. Use the non-clobbering marker so that
-            // continuation cells of wide title glyphs keep their flag.
+            // Legacy output retains its historical whole-row protection.
+            // Structured canvases protect the actual title, allowing routes
+            // to cross the remaining border fill without disappearing.
             for dx in 1..(w - 1) {
-                canvas.mark_subgraph_title(x + dx, y);
+                if !canvas.is_bounded() || (title_start..title_end).contains(&(x + dx)) {
+                    canvas.mark_subgraph_title(x + dx, y);
+                }
             }
         } else {
             // No title or too narrow: plain horizontal
@@ -132,7 +141,9 @@ fn render_region_dividers(
     subgraph_bounds: &HashMap<String, SubgraphBounds>,
     charset: &CharSet,
 ) {
-    for parent in subgraph_bounds.values() {
+    let mut parents: Vec<_> = subgraph_bounds.iter().collect();
+    parents.sort_by_key(|(id, _)| *id);
+    for (_, parent) in parents {
         if parent.concurrent_regions.len() < 2 {
             continue;
         }
@@ -180,6 +191,42 @@ fn render_region_dividers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_title_overlapping_borders_have_stable_paint_order() {
+        let first = SubgraphBounds {
+            x: 0,
+            y: 0,
+            width: 14,
+            height: 6,
+            title: "Group".to_owned(),
+            depth: 0,
+            invisible: false,
+            concurrent_regions: Vec::new(),
+        };
+        let second = SubgraphBounds {
+            x: 7,
+            y: 3,
+            ..first.clone()
+        };
+        let mut expected = None;
+        for iteration in 0..64 {
+            let mut entries = [("alpha", first.clone()), ("beta", second.clone())];
+            entries.rotate_left(iteration % 2);
+            let bounds = entries
+                .into_iter()
+                .map(|(id, bounds)| (id.to_owned(), bounds))
+                .collect();
+            let mut canvas = Canvas::new(24, 12);
+            render_subgraph_borders(&mut canvas, &bounds, &CharSet::unicode());
+            let text = canvas.to_string();
+            if let Some(expected) = &expected {
+                assert_eq!(&text, expected, "fresh subgraph map {iteration}");
+            } else {
+                expected = Some(text);
+            }
+        }
+    }
 
     #[test]
     fn test_render_subgraph_border_characters() {

@@ -70,6 +70,9 @@ impl GraphTextStyleConfig {
 pub struct RenderConfig {
     /// Layout configuration.
     pub layout: LayoutConfig,
+    /// Carry layout spacing through terminal-cell projection. Opt-in preserves
+    /// legacy text output; interactive consumers should enable this.
+    pub text_layout_spacing: bool,
     /// Layout engine+algorithm selection.
     pub layout_engine: Option<EngineAlgorithmId>,
     /// Cluster (subgraph) rank separation override.
@@ -112,6 +115,13 @@ impl RenderConfig {
     /// Build text render options from this config.
     pub fn text_render_options(&self, format: OutputFormat) -> TextRenderOptions {
         TextRenderOptions {
+            layout_spacing: self.text_layout_spacing.then_some(
+                crate::graph::grid::GridLayoutSpacing {
+                    node_sep: self.layout.node_sep,
+                    rank_sep: self.layout.rank_sep,
+                    edge_sep: self.layout.edge_sep,
+                },
+            ),
             output_format: format,
             text_color_mode: self.text_color_mode,
             routing_style: self
@@ -181,6 +191,30 @@ mod tests {
         assert_eq!(options.output_format, OutputFormat::Text);
         assert_eq!(options.routing_style, RoutingStyle::Orthogonal);
         assert!(!options.use_pinned_ranks);
+        assert!(
+            options.layout_spacing.is_none(),
+            "legacy defaults stay unchanged"
+        );
+    }
+
+    #[test]
+    fn text_render_options_carry_opted_in_spacing_to_the_grid() {
+        let config = RenderConfig {
+            text_layout_spacing: true,
+            layout: LayoutConfig {
+                node_sep: 8.0,
+                rank_sep: 15.0,
+                edge_sep: 8.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let spacing = config
+            .text_render_options(OutputFormat::Text)
+            .layout_spacing
+            .unwrap();
+        assert_eq!(spacing.node_sep, 8.0);
+        assert_eq!(spacing.rank_sep, 15.0);
     }
 
     #[test]

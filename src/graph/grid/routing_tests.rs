@@ -811,6 +811,56 @@ fn draw_path_collision_repair_detours_around_blocker() {
 }
 
 #[test]
+fn draw_path_collision_repair_is_independent_of_obstacle_map_order() {
+    let edge = Edge::new("A", "B");
+    let bounds = [
+        ("A", make_bounds_sized(0, 4, 8, 3)),
+        ("B", make_bounds_sized(40, 4, 8, 3)),
+        ("C", make_bounds_sized(12, 3, 5, 4)),
+        ("D", make_bounds_sized(25, 5, 5, 5)),
+    ];
+    let path = [(7, 5), (40, 5)];
+    let expected = repair_draw_path_segment_collisions(&path, &minimal_layout(&bounds, &[]), &edge);
+    assert_ne!(expected, path);
+    for iteration in 0..64 {
+        // A fresh map gets a fresh random seed; also vary insertion order.
+        let mut reordered = bounds;
+        reordered.rotate_left(iteration % bounds.len());
+        let actual =
+            repair_draw_path_segment_collisions(&path, &minimal_layout(&reordered, &[]), &edge);
+        assert_eq!(actual, expected, "fresh obstacle map {iteration}");
+    }
+}
+
+#[test]
+fn containing_subgraph_ties_use_stable_identity() {
+    let container = SubgraphBounds {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 20,
+        title: String::new(),
+        depth: 1,
+        invisible: false,
+        concurrent_regions: Vec::new(),
+    };
+    for iteration in 0..64 {
+        let mut layout = minimal_layout(&[("node", make_bounds(5, 5))], &[]);
+        let mut ids = ["alpha", "beta", "gamma"];
+        ids.rotate_left(iteration % 3);
+        layout.subgraph_bounds = ids
+            .into_iter()
+            .map(|id| (id.to_owned(), container.clone()))
+            .collect();
+        assert_eq!(
+            super::super::bounds::containing_subgraph_id_uncached(&layout, "node"),
+            Some("alpha"),
+            "fresh container map {iteration}"
+        );
+    }
+}
+
+#[test]
 fn draw_path_normalization_repairs_terminal_staircase() {
     let normalized = normalize_draw_path_points(
         &[(12, 0), (12, 2), (12, 5), (18, 5), (18, 8)],

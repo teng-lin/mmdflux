@@ -21,6 +21,7 @@ pub mod projection;
 pub mod routing;
 pub mod space;
 pub mod style;
+pub mod text_view;
 
 pub use diagram::{Direction, Graph, GraphNote, NotePosition, Subgraph};
 pub use edge::{Arrow, Edge, Stroke};
