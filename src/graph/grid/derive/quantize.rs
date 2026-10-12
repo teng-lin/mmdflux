@@ -6,6 +6,76 @@
 use std::collections::HashMap;
 
 use crate::graph::grid::{GridPos, NodeBounds};
+use crate::graph::{Direction, Graph};
+
+/// Reserve label space only across the connection that needs it. Shifting a
+/// suffix preserves existing node order and cannot reduce another pair's gap.
+pub(super) fn local_label_gap_repair(
+    graph: &Graph,
+    positions: &mut HashMap<String, (usize, usize)>,
+    dimensions: &HashMap<String, (usize, usize)>,
+) {
+    if !matches!(graph.direction, Direction::LeftRight | Direction::RightLeft) {
+        return;
+    }
+    let mut neighbors = HashMap::<&str, Vec<&str>>::new();
+    for edge in &graph.edges {
+        neighbors.entry(&edge.from).or_default().push(&edge.to);
+        neighbors.entry(&edge.to).or_default().push(&edge.from);
+    }
+    let mut components = HashMap::<&str, usize>::new();
+    for id in graph.nodes.keys() {
+        if components.contains_key(id.as_str()) {
+            continue;
+        }
+        let component = components.len();
+        let mut pending = vec![id.as_str()];
+        while let Some(node) = pending.pop() {
+            if components.contains_key(node) {
+                continue;
+            }
+            components.insert(node, component);
+            pending.extend(neighbors.get(node).into_iter().flatten().copied());
+        }
+    }
+    let mut constraints = Vec::new();
+    for edge in &graph.edges {
+        let Some(label) = &edge.label else { continue };
+        let Some(&(from_x, _)) = positions.get(&edge.from) else {
+            continue;
+        };
+        let Some(&(to_x, _)) = positions.get(&edge.to) else {
+            continue;
+        };
+        if from_x == to_x {
+            continue;
+        }
+        let (left, right) = if from_x < to_x {
+            (&edge.from, &edge.to)
+        } else {
+            (&edge.to, &edge.from)
+        };
+        let width = label
+            .lines()
+            .map(crate::format::display_width)
+            .max()
+            .unwrap_or(0);
+        constraints.push((positions[right].0, edge.index, left, right, width + 4));
+    }
+    constraints.sort_by_key(|&(x, index, _, _, _)| (x, index));
+    for (_, _, left, right, gap) in constraints {
+        let required = positions[left].0 + dimensions[left].0 + gap;
+        let start = positions[right].0;
+        if required > start {
+            let shift = required - start;
+            for (id, (x, _)) in positions.iter_mut() {
+                if components[id.as_str()] == components[right.as_str()] && *x >= start {
+                    *x += shift;
+                }
+            }
+        }
+    }
+}
 
 pub(super) fn compute_grid_positions(layers: &[Vec<String>]) -> HashMap<String, GridPos> {
     let mut positions = HashMap::new();
@@ -147,9 +217,20 @@ pub(super) fn rank_gap_repair(
         return;
     }
 
-    for i in 1..layers.len() {
+    // Pinned ranks include empty dummy/label layers. An empty layer has no
+    // extent: treating its minimum as zero repeatedly shifts every later rank
+    // by the preceding node's absolute position, inflating sparse layouts.
+    let populated: Vec<usize> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| layer.iter().any(|id| draw_positions.contains_key(id)))
+        .map(|(index, _)| index)
+        .collect();
+    for pair in populated.windows(2) {
+        let previous = pair[0];
+        let i = pair[1];
         // Find the maximum primary-axis extent of the previous layer
-        let prev_max = layers[i - 1]
+        let prev_max = layers[previous]
             .iter()
             .filter_map(|id| {
                 let &(x, y) = draw_positions.get(id)?;

@@ -3,6 +3,7 @@
 //! Renders a `SequenceLayout` onto a shared `Canvas` using box-drawing
 //! characters from `CharSet`. Supports both Unicode and ASCII output.
 
+use crate::format::display_width;
 use crate::graph::Stroke;
 use crate::render::text::canvas::Canvas;
 use crate::render::text::chars::CharSet;
@@ -22,22 +23,26 @@ pub fn render(layout: &SequenceLayout, charset: &CharSet) -> String {
     }
 
     let mut canvas = Canvas::new(layout.width, layout.height);
+    paint(layout, charset, &mut canvas);
+    canvas.to_string()
+}
 
+pub(super) fn paint(layout: &SequenceLayout, charset: &CharSet, canvas: &mut Canvas) {
     if let Some(title) = &layout.title {
-        draw_title(&mut canvas, title);
+        draw_title(canvas, title);
     }
 
     for participant_box in &layout.participant_boxes {
-        draw_participant_group_box(&mut canvas, participant_box, charset);
+        draw_participant_group_box(canvas, participant_box, charset);
     }
 
     for p in &layout.participants {
-        draw_participant_header(&mut canvas, p, charset);
+        draw_participant_header(canvas, p, charset);
     }
 
     for p in &layout.participants {
         draw_lifeline(
-            &mut canvas,
+            canvas,
             p.center_x,
             p.lifeline_start_y,
             p.lifeline_end_y,
@@ -46,12 +51,12 @@ pub fn render(layout: &SequenceLayout, charset: &CharSet) -> String {
     }
 
     for block in &layout.blocks {
-        draw_block(&mut canvas, block, charset);
+        draw_block(canvas, block, charset);
     }
 
     // Draw activation boxes on lifelines
     for activation in &layout.activations {
-        draw_activation(&mut canvas, activation, &layout.participants, charset);
+        draw_activation(canvas, activation, &layout.participants, charset);
     }
 
     for row in &layout.rows {
@@ -69,26 +74,11 @@ pub fn render(layout: &SequenceLayout, charset: &CharSet) -> String {
             } => {
                 if from_idx == to_idx {
                     draw_self_message(
-                        &mut canvas,
-                        *from_x,
-                        *y,
-                        text,
-                        number,
-                        line_style,
-                        arrow_head,
-                        charset,
+                        canvas, *from_x, *y, text, number, line_style, arrow_head, charset,
                     );
                 } else {
                     draw_message(
-                        &mut canvas,
-                        *from_x,
-                        *to_x,
-                        *y,
-                        text,
-                        number,
-                        line_style,
-                        arrow_head,
-                        charset,
+                        canvas, *from_x, *to_x, *y, text, number, line_style, arrow_head, charset,
                     );
                 }
             }
@@ -99,7 +89,7 @@ pub fn render(layout: &SequenceLayout, charset: &CharSet) -> String {
                 text,
             } => {
                 draw_note(
-                    &mut canvas,
+                    canvas,
                     &layout.participants,
                     placement,
                     participant_indices,
@@ -113,15 +103,13 @@ pub fn render(layout: &SequenceLayout, charset: &CharSet) -> String {
 
     for participant in &layout.participants {
         if let Some(y) = participant.destroy_y {
-            draw_destroy_marker(&mut canvas, participant.center_x, y);
+            draw_destroy_marker(canvas, participant.center_x, y);
         }
     }
-
-    canvas.to_string()
 }
 
 fn draw_title(canvas: &mut Canvas, title: &TitleLayout) {
-    let x = canvas.width().saturating_sub(title.text.len()) / 2;
+    let x = canvas.width().saturating_sub(display_width(&title.text)) / 2;
     canvas.write_str(x, title.y, &title.text);
 }
 
@@ -139,7 +127,7 @@ fn draw_participant_header(canvas: &mut Canvas, p: &ParticipantLayout, cs: &Char
     canvas.set(x, y + 1, cs.vertical);
     canvas.set(x + 1, y + 1, ' ');
     canvas.write_str(x + 2, y + 1, &p.label);
-    canvas.set(x + 2 + p.label.len(), y + 1, ' ');
+    canvas.set(x + 2 + display_width(&p.label), y + 1, ' ');
     canvas.set(x + w - 1, y + 1, cs.vertical);
 
     canvas.set(x, y + 2, cs.corner_bl);
@@ -181,7 +169,7 @@ fn draw_participant_group_box(
             canvas.set(x, top + 1, ' ');
         }
         let available_width = right.saturating_sub(left + 1);
-        let label_x = left + 1 + available_width.saturating_sub(label.len()) / 2;
+        let label_x = left + 1 + available_width.saturating_sub(display_width(label)) / 2;
         canvas.write_str(label_x, top + 1, label);
     }
 }
@@ -529,7 +517,7 @@ fn draw_note(
     text: &str,
     cs: &CharSet,
 ) {
-    let min_box_width = text.len() + 4;
+    let min_box_width = display_width(text) + 4;
 
     let (box_x, box_width) = match placement {
         NotePlacement::LeftOf => {
@@ -569,7 +557,7 @@ fn draw_note(
     for i in 1..box_width - 1 {
         canvas.set(box_x + i, y + 1, ' ');
     }
-    let text_offset = (box_width - 2 - text.len()) / 2;
+    let text_offset = (box_width - 2 - display_width(text)) / 2;
     canvas.write_str(box_x + 1 + text_offset, y + 1, text);
     canvas.set(box_x + box_width - 1, y + 1, cs.vertical);
 

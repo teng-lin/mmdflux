@@ -4,6 +4,235 @@ use crate::graph::geometry::{FPoint, FRect, GraphGeometry, LayoutEdge, Positione
 use crate::graph::grid::{AttachDirection, GridLayout, Point, RoutedEdge, Segment};
 use crate::graph::{Direction, Edge, Graph, Node, Shape};
 use crate::render::graph::{TextRenderOptions, render_text_from_geometry};
+use crate::render::text::TextRenderLimits;
+
+#[test]
+fn bounded_cluster_junction_preserves_arrow_markers() {
+    use crate::render::text::canvas::Connections;
+    use crate::render::text::{Canvas, CharSet};
+    let charset = CharSet::unicode();
+    let mut canvas = Canvas::new_limited(
+        5,
+        5,
+        TextRenderLimits {
+            max_width: 5,
+            max_height: 5,
+            max_cells: 25,
+        },
+    )
+    .unwrap();
+    canvas.set(2, 2, '►');
+    canvas.expect_text(2, 2, "►");
+    let connections = Connections {
+        up: true,
+        down: true,
+        left: true,
+        right: true,
+    };
+    super::set_junction_cell(&mut canvas, 2, 2, connections, &charset);
+    assert_eq!(canvas.get(2, 2).unwrap().ch, '►');
+    assert!(canvas.emission_diagnostics().is_empty());
+    canvas.set(3, 2, '─');
+    super::set_junction_cell(&mut canvas, 3, 2, connections, &charset);
+    assert_eq!(canvas.get(3, 2).unwrap().ch, '┼');
+}
+
+#[test]
+fn compacted_capture_keeps_route_cells_and_node_rectangles_in_sync() {
+    use crate::graph::grid::{GridLayoutSpacing, NodeBounds};
+    let mut graph = Graph::new(Direction::TopDown);
+    graph.add_node(Node::new("A").with_label("Start"));
+    graph.add_node(Node::new("B").with_label("End"));
+    graph.add_edge(Edge::new("A", "B"));
+    let bounds = |y| NodeBounds {
+        x: 4,
+        y,
+        width: 9,
+        height: 3,
+        layout_center_x: None,
+        layout_center_y: None,
+    };
+    let layout = GridLayout {
+        width: 18,
+        height: 110,
+        h_spacing: 4,
+        v_spacing: 3,
+        node_bounds: HashMap::from([("A".into(), bounds(4)), ("B".into(), bounds(100))]),
+        draw_positions: HashMap::from([("A".into(), (4, 4)), ("B".into(), (4, 100))]),
+        ..Default::default()
+    };
+    let baseline = super::render_text_capture_from_grid_layout(
+        &graph,
+        &layout,
+        None,
+        &TextRenderOptions::default(),
+        &TextRenderLimits {
+            max_width: 100,
+            max_height: 120,
+            max_cells: 12000,
+        },
+    )
+    .unwrap();
+    let result = super::render_text_capture_from_grid_layout(
+        &graph,
+        &layout,
+        None,
+        &TextRenderOptions {
+            layout_spacing: Some(GridLayoutSpacing {
+                node_sep: 8.0,
+                rank_sep: 15.0,
+                edge_sep: 8.0,
+            }),
+            ..Default::default()
+        },
+        &TextRenderLimits {
+            max_width: 100,
+            max_height: 120,
+            max_cells: 12000,
+        },
+    )
+    .unwrap();
+    assert!(result.height < 20, "{}", result.height);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let rows: Vec<_> = result.text.lines().collect();
+    for (id, bounds) in &result.node_bounds {
+        let original = &baseline.node_bounds[id];
+        assert_eq!(
+            (bounds.width, bounds.height),
+            (original.width, original.height)
+        );
+        assert_eq!(rows[bounds.y].chars().nth(bounds.x), Some('┌'));
+    }
+    for route in &result.routes {
+        for segment in &route.segments {
+            for offset in 0..=segment.length() {
+                let point = segment.point_at_offset(offset);
+                assert!(point.y < result.height && point.x < result.width);
+                assert_ne!(rows[point.y].chars().nth(point.x), Some(' '), "{point:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn structured_capture_cell_rectangles_match_serialized_boxes() {
+    let (diagram, geometry) = smoke_graph_geometry();
+    let result = crate::render::graph::render_text_from_geometry_capture(
+        &diagram,
+        &geometry,
+        None,
+        &TextRenderOptions::default(),
+        &TextRenderLimits {
+            max_width: 500,
+            max_height: 500,
+            max_cells: 250_000,
+        },
+    )
+    .unwrap();
+    let lines: Vec<_> = result.text.lines().collect();
+    assert_eq!(result.height, lines.len());
+    assert_eq!(
+        result.width,
+        lines
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(*s))
+            .max()
+            .unwrap()
+    );
+    assert_eq!(result.routed_edge_indices, vec![0]);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    for route in &result.routes {
+        for segment in &route.segments {
+            for offset in 0..=segment.length() {
+                let point = segment.point_at_offset(offset);
+                assert_ne!(
+                    lines[point.y].chars().nth(point.x),
+                    Some(' '),
+                    "missing painted route cell {point:?}"
+                );
+            }
+        }
+    }
+    for (id, bounds) in &result.node_bounds {
+        assert_eq!(lines[bounds.y].chars().nth(bounds.x), Some('┌'), "{id}");
+        assert_eq!(
+            lines[bounds.y].chars().nth(bounds.x + bounds.width - 1),
+            Some('┐'),
+            "{id}"
+        );
+        assert!(lines[bounds.y + 1].contains(&diagram.nodes[id].label));
+        assert!(bounds.x + bounds.width <= result.width);
+        assert!(bounds.y + bounds.height <= result.height);
+    }
+}
+
+#[test]
+fn structured_capture_preserves_graphemes_inside_measured_node() {
+    use crate::graph::grid::NodeBounds;
+    let label = "e\u{301}中👩\u{200d}💻";
+    let mut graph = Graph::new(Direction::TopDown);
+    graph.add_node(Node::new("unicode").with_label(label));
+    let bounds = NodeBounds {
+        x: 5,
+        y: 4,
+        width: 9,
+        height: 3,
+        layout_center_x: None,
+        layout_center_y: None,
+    };
+    let layout = GridLayout {
+        width: 20,
+        height: 10,
+        draw_positions: HashMap::from([("unicode".into(), (5, 4))]),
+        node_bounds: HashMap::from([("unicode".into(), bounds)]),
+        ..Default::default()
+    };
+    let result = super::render_text_capture_from_grid_layout(
+        &graph,
+        &layout,
+        None,
+        &TextRenderOptions::default(),
+        &TextRenderLimits {
+            max_width: 100,
+            max_height: 100,
+            max_cells: 10000,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.origin, (5, 4));
+    assert_eq!((result.width, result.height), (9, 3));
+    assert_eq!(
+        (
+            result.node_bounds["unicode"].x,
+            result.node_bounds["unicode"].y
+        ),
+        (0, 0)
+    );
+    assert_eq!(result.text.lines().nth(1).unwrap(), format!("│ {label} │"));
+    for line in result.text.lines() {
+        assert_eq!(unicode_width::UnicodeWidthStr::width(line), 9);
+    }
+}
+
+#[test]
+fn structured_capture_rejects_canvas_limits_before_paint() {
+    let (diagram, geometry) = smoke_graph_geometry();
+    assert!(
+        crate::render::graph::render_text_from_geometry_capture(
+            &diagram,
+            &geometry,
+            None,
+            &TextRenderOptions::default(),
+            &TextRenderLimits {
+                max_width: 1,
+                max_height: 1,
+                max_cells: 1
+            },
+        )
+        .unwrap_err()
+        .contains("limit")
+    );
+}
 
 #[test]
 fn text_owner_local_smoke_renders_text_output() {

@@ -718,6 +718,7 @@ fn main() -> io::Result<()> {
 
     // Build render config from CLI flags.
     let mut config = RenderConfig {
+        text_layout_spacing: false,
         layout: LayoutConfig {
             node_sep: cli.node_spacing.unwrap_or(50.0),
             edge_sep: cli.edge_spacing.unwrap_or(20.0),

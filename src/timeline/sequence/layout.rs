@@ -3,10 +3,16 @@
 //! Computes character-grid positions for participants, messages,
 //! and notes. Output is consumed by the text renderer.
 
+use unicode_width::UnicodeWidthStr;
+
 use super::model::{
     ArrowHead, BlockDividerKind, BlockKind, LineStyle, NotePlacement, Participant, ParticipantBox,
     ParticipantKind, Sequence, SequenceEvent,
 };
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
 
 /// Minimum gap between participant centers (characters).
 const MIN_PARTICIPANT_GAP: usize = 20;
@@ -431,7 +437,10 @@ pub fn layout(model: &Sequence) -> SequenceLayout {
 
     let max_block_right = blocks.iter().map(|block| block.right_x).max().unwrap_or(0);
 
-    let title_width = title.as_ref().map(|title| title.text.len()).unwrap_or(0);
+    let title_width = title
+        .as_ref()
+        .map(|title| display_width(&title.text))
+        .unwrap_or(0);
     let width = max_participant_right
         .max(max_participant_box_right)
         .max(max_row_right)
@@ -532,7 +541,7 @@ fn block_label_len(keyword: &str, label: &str) -> usize {
     let text_len = if label.is_empty() {
         badge_len
     } else {
-        badge_len + 1 + label.len()
+        badge_len + 1 + display_width(label)
     };
     text_len + 3
 }
@@ -569,7 +578,7 @@ fn row_extent(row: &RowLayout, participants: &[ParticipantLayout]) -> (usize, us
             text,
             ..
         } => {
-            let box_width = text.len() + 4;
+            let box_width = display_width(text) + 4;
             match placement {
                 NotePlacement::LeftOf => {
                     let center_x = participants[participant_indices[0]].center_x;
@@ -606,10 +615,10 @@ fn format_label_len(text: &str, number: &Option<usize>) -> usize {
             if text.is_empty() {
                 format!("{n}.").len()
             } else {
-                format!("{n}. {text}").len()
+                display_width(&format!("{n}. {text}"))
             }
         }
-        None => text.len(),
+        None => display_width(text),
     }
 }
 
@@ -627,7 +636,7 @@ fn compute_participant_gap(model: &Sequence) -> usize {
                 ..
             } if from != to => {
                 let prefix_len = number.map(|n| format!("{n}. ").len()).unwrap_or(0);
-                Some(text.len() + prefix_len)
+                Some(display_width(text) + prefix_len)
             }
             _ => None,
         })
@@ -647,10 +656,10 @@ fn compute_left_note_margin(model: &Sequence) -> usize {
     let mut centers = Vec::with_capacity(model.participants.len());
     let mut x = 1usize;
     for (i, p) in model.participants.iter().enumerate() {
-        let box_width = p.label.len() + 4;
+        let box_width = display_width(&p.label) + 4;
         centers.push(x + box_width / 2);
         if i < model.participants.len() - 1 {
-            let next_bw = model.participants[i + 1].label.len() + 4;
+            let next_bw = display_width(&model.participants[i + 1].label) + 4;
             x = centers[i] + MIN_PARTICIPANT_GAP - next_bw / 2;
         }
     }
@@ -663,7 +672,7 @@ fn compute_left_note_margin(model: &Sequence) -> usize {
             text,
         } = event
         {
-            let box_width = text.len() + 4;
+            let box_width = display_width(text) + 4;
             let center_x = centers[indices[0]];
             // The renderer places the box at center_x - (box_width + 1)
             let needed = box_width + 1;
@@ -686,7 +695,7 @@ fn layout_participants(
     let mut x = 1 + left_margin; // left margin + space for left-of notes
 
     for (i, p) in participants.iter().enumerate() {
-        let box_width = p.label.len() + 4; // | + space + label + space + |
+        let box_width = display_width(&p.label) + 4; // | + space + label + space + |
         let center_x = x + box_width / 2;
 
         result.push(ParticipantLayout {
@@ -703,7 +712,7 @@ fn layout_participants(
 
         if i < participants.len() - 1 {
             // Next participant starts at center_x + gap - half of next box
-            let next_label_len = participants[i + 1].label.len();
+            let next_label_len = display_width(&participants[i + 1].label);
             let next_box_width = next_label_len + 4;
             x = center_x + gap - next_box_width / 2;
         }
@@ -731,7 +740,7 @@ fn layout_participant_boxes(
             let min_width = participant_box
                 .label
                 .as_ref()
-                .map(|label| label.len() + 4)
+                .map(|label| display_width(label) + 4)
                 .unwrap_or(0)
                 .max(6);
             let current_width = right_x.saturating_sub(left_x) + 1;

@@ -267,6 +267,7 @@ pub fn get_predecessors(graph: &LayoutGraph, node: NodeIndex) -> Vec<NodeIndex> 
 /// Get the successors of a node (nodes in the layer below that this node connects to).
 ///
 /// Returns node indices sorted by their position in their layer.
+#[cfg(test)]
 pub fn get_successors(graph: &LayoutGraph, node: NodeIndex) -> Vec<NodeIndex> {
     let effective_edges = graph.effective_edges();
     let mut successors: Vec<NodeIndex> = effective_edges
@@ -280,6 +281,26 @@ pub fn get_successors(graph: &LayoutGraph, node: NodeIndex) -> Vec<NodeIndex> {
 
     successors.sort_by_key(|&n| graph.order[n]);
     successors
+}
+
+/// Immutable per-pass adjacency, equivalent to get_predecessors/successors.
+/// Long-edge normalization creates many dummy nodes; scanning all edges for
+/// each of those nodes turns linear adjacency work into a quadratic hot path.
+fn position_neighbors(graph: &LayoutGraph, predecessors: bool) -> Vec<Vec<NodeIndex>> {
+    let mut result = vec![Vec::new(); graph.node_ids.len()];
+    for (index, (from, to)) in graph.effective_edges().into_iter().enumerate() {
+        if graph.excluded_edges.contains(&index) {
+            continue;
+        }
+        let (node, neighbor) = if predecessors { (to, from) } else { (from, to) };
+        if graph.is_position_node(neighbor) {
+            result[node].push(neighbor);
+        }
+    }
+    for neighbors in &mut result {
+        neighbors.sort_by_key(|node| graph.order[*node]);
+    }
+    result
 }
 
 /// Get neighbors based on sweep direction.
@@ -418,6 +439,7 @@ pub fn find_type1_conflicts(graph: &LayoutGraph) -> ConflictSet {
     if layers.len() < 2 {
         return conflicts;
     }
+    let predecessors = position_neighbors(graph, true);
 
     for layer_idx in 1..layers.len() {
         let prev_layer = &layers[layer_idx - 1];
@@ -432,7 +454,7 @@ pub fn find_type1_conflicts(graph: &LayoutGraph) -> ConflictSet {
             let Some(v) = *v else {
                 continue;
             };
-            let w = find_other_inner_segment_node(graph, v);
+            let w = find_other_inner_segment_node(graph, v, &predecessors[v]);
             let k1 = w
                 .map(|node| graph.order[node] as isize)
                 .unwrap_or(prev_layer_len as isize);
@@ -442,7 +464,7 @@ pub fn find_type1_conflicts(graph: &LayoutGraph) -> ConflictSet {
                     let Some(scan_node) = *scan_node_opt else {
                         continue;
                     };
-                    for u in get_predecessors(graph, scan_node) {
+                    for &u in &predecessors[scan_node] {
                         let u_pos = graph.order[u] as isize;
                         if (u_pos < k0 || k1 < u_pos)
                             && !(is_dummy_like(graph, u) && is_dummy_like(graph, scan_node))
@@ -465,12 +487,17 @@ pub fn find_type1_conflicts(graph: &LayoutGraph) -> ConflictSet {
     conflicts
 }
 
-fn find_other_inner_segment_node(graph: &LayoutGraph, node: NodeIndex) -> Option<NodeIndex> {
+fn find_other_inner_segment_node(
+    graph: &LayoutGraph,
+    node: NodeIndex,
+    predecessors: &[NodeIndex],
+) -> Option<NodeIndex> {
     if !is_dummy_like(graph, node) {
         return None;
     }
-    get_predecessors(graph, node)
-        .into_iter()
+    predecessors
+        .iter()
+        .copied()
         .find(|&u| is_dummy_like(graph, u))
 }
 
@@ -492,6 +519,13 @@ pub fn find_type2_conflicts(graph: &LayoutGraph) -> ConflictSet {
     if bk_trace_enabled() {
         debug_dump_layer_matrix(graph, &layers);
     }
+    // The graph and order are immutable for this pass. Preserve predecessor
+    // order/duplicates while avoiding a whole-edge scan per dummy visit.
+    let predecessors = position_neighbors(graph, true);
+    let context = Type2ScanContext {
+        graph,
+        predecessors: &predecessors,
+    };
 
     for layer in 1..layers.len() {
         let north = &layers[layer - 1];
@@ -504,27 +538,25 @@ pub fn find_type2_conflicts(graph: &LayoutGraph) -> ConflictSet {
         for (south_lookahead, slot) in south.iter().enumerate() {
             if let Some(v) = *slot
                 && is_border_node(graph, v)
+                && let Some(&first) = predecessors[v].first()
             {
-                let predecessors = get_predecessors(graph, v);
-                if let Some(&first) = predecessors.first() {
-                    next_north_pos = Some(graph.order[first] as isize);
-                    scan_type2_conflicts(
-                        graph,
-                        &mut conflicts,
-                        south,
-                        south_pos,
-                        south_lookahead,
-                        prev_north_pos,
-                        next_north_pos.unwrap_or(north.len() as isize),
-                    );
-                    south_pos = south_lookahead;
-                    prev_north_pos = next_north_pos.unwrap_or(prev_north_pos);
-                }
+                next_north_pos = Some(graph.order[first] as isize);
+                scan_type2_conflicts(
+                    &context,
+                    &mut conflicts,
+                    south,
+                    south_pos,
+                    south_lookahead,
+                    prev_north_pos,
+                    next_north_pos.unwrap_or(north.len() as isize),
+                );
+                south_pos = south_lookahead;
+                prev_north_pos = next_north_pos.unwrap_or(prev_north_pos);
             }
 
             let scan_prev = next_north_pos.unwrap_or(prev_north_pos);
             scan_type2_conflicts(
-                graph,
+                &context,
                 &mut conflicts,
                 south,
                 south_pos,
@@ -538,8 +570,13 @@ pub fn find_type2_conflicts(graph: &LayoutGraph) -> ConflictSet {
     conflicts
 }
 
+struct Type2ScanContext<'a> {
+    graph: &'a LayoutGraph,
+    predecessors: &'a [Vec<NodeIndex>],
+}
+
 fn scan_type2_conflicts(
-    graph: &LayoutGraph,
+    context: &Type2ScanContext<'_>,
     conflicts: &mut ConflictSet,
     south: &[Option<NodeIndex>],
     south_pos: usize,
@@ -547,6 +584,7 @@ fn scan_type2_conflicts(
     prev_north_border: isize,
     next_north_border: isize,
 ) {
+    let graph = context.graph;
     for v_opt in south.iter().take(south_end).skip(south_pos) {
         let Some(v) = *v_opt else {
             continue;
@@ -554,7 +592,7 @@ fn scan_type2_conflicts(
         if !is_dummy_like(graph, v) {
             continue;
         }
-        for u in get_predecessors(graph, v) {
+        for &u in &context.predecessors[v] {
             if !is_dummy_like(graph, u) {
                 continue;
             }
@@ -716,6 +754,7 @@ fn vertical_alignment_with_layering(
     }
 
     let trace_enabled = bk_trace_enabled();
+    let neighbors_by_node = position_neighbors(graph, downward);
 
     let mut pos: HashMap<NodeIndex, isize> = HashMap::new();
     for layer in layers {
@@ -733,11 +772,7 @@ fn vertical_alignment_with_layering(
                 continue;
             };
 
-            let mut neighbors = if downward {
-                get_predecessors(graph, v)
-            } else {
-                get_successors(graph, v)
-            };
+            let mut neighbors = neighbors_by_node[v].clone();
             if neighbors.is_empty() {
                 continue;
             }

@@ -20,6 +20,7 @@ use crate::graph::measure::{TextMetricsProvider, default_proportional_text_metri
 use crate::graph::routing::{self, EdgeRouting};
 use crate::graph::{Direction, Graph};
 use crate::render::svg::theme::ResolvedSvgTheme;
+pub use crate::render::text::{TextRenderCapture, TextRenderLimits};
 use crate::simplification::PathSimplification;
 
 pub(crate) fn edge_routing_from_style(routing_style: RoutingStyle) -> EdgeRouting {
@@ -33,6 +34,7 @@ pub(crate) fn edge_routing_from_style(routing_style: RoutingStyle) -> EdgeRoutin
 /// Public text render options for render-only geometry emission.
 #[derive(Debug, Clone)]
 pub struct TextRenderOptions {
+    pub layout_spacing: Option<crate::graph::grid::GridLayoutSpacing>,
     pub output_format: OutputFormat,
     pub text_color_mode: TextColorMode,
     pub routing_style: RoutingStyle,
@@ -46,6 +48,7 @@ pub struct TextRenderOptions {
 impl Default for TextRenderOptions {
     fn default() -> Self {
         Self {
+            layout_spacing: None,
             output_format: OutputFormat::Text,
             text_color_mode: TextColorMode::Plain,
             routing_style: RoutingStyle::Orthogonal,
@@ -227,6 +230,44 @@ pub fn render_text_from_geometry(
     text::render_text_from_grid_layout(diagram, &layout, Some(routed), options)
 }
 
+/// Bounded plain-text emission with geometry in final terminal-cell coordinates.
+pub fn render_text_from_geometry_capture(
+    diagram: &Graph,
+    geometry: &GraphGeometry,
+    routed: Option<&RoutedGraphGeometry>,
+    options: &TextRenderOptions,
+    limits: &TextRenderLimits,
+) -> Result<TextRenderCapture, String> {
+    let routed_owned;
+    let routed = match routed {
+        Some(routed) => routed,
+        None => {
+            routed_owned = routing::route_graph_geometry(
+                diagram,
+                geometry,
+                edge_routing_from_style(options.routing_style),
+                &default_proportional_text_metrics(),
+            );
+            &routed_owned
+        }
+    };
+    let config = layout_config_for_diagram(diagram, options);
+    let mut layout = crate::graph::grid::geometry_to_grid_layout_with_routed(
+        diagram,
+        geometry,
+        Some(routed),
+        &config,
+    );
+    let packed = crate::graph::text_view::pack_disconnected_components(diagram, &mut layout);
+    text::render_text_capture_from_grid_layout(
+        diagram,
+        &layout,
+        (!packed).then_some(routed),
+        options,
+        limits,
+    )
+}
+
 /// Render a diagram to the configured output format.
 ///
 /// # Example
@@ -313,7 +354,10 @@ pub(crate) fn layout_config_for_diagram(
     diagram: &Graph,
     options: &TextRenderOptions,
 ) -> crate::graph::grid::GridLayoutConfig {
-    let mut config = crate::graph::grid::GridLayoutConfig::default();
+    let mut config = crate::graph::grid::GridLayoutConfig {
+        local_label_spacing: options.layout_spacing.is_some() && !diagram.has_subgraphs(),
+        ..Default::default()
+    };
 
     let max_label_len = diagram
         .edges
@@ -325,7 +369,9 @@ pub(crate) fn layout_config_for_diagram(
 
     match diagram.direction {
         Direction::LeftRight | Direction::RightLeft => {
-            config.h_spacing = config.h_spacing.max(max_label_len + 4);
+            if !config.local_label_spacing {
+                config.h_spacing = config.h_spacing.max(max_label_len + 4);
+            }
         }
         Direction::TopDown | Direction::BottomTop => {
             if max_label_len > 0 {
@@ -361,6 +407,13 @@ pub(crate) fn layout_config_for_diagram(
         config.padding = padding;
     }
     config.use_pinned_ranks = options.use_pinned_ranks;
+
+    if let Some(spacing) = options.layout_spacing {
+        spacing.apply(diagram.direction, &mut config);
+        // Tiny spacing must not merge distinct solver ranks merely because
+        // their coordinates are less than the legacy 25-unit heuristic apart.
+        config.use_pinned_ranks |= !diagram.has_subgraphs();
+    }
 
     config
 }

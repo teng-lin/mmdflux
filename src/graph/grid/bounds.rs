@@ -115,7 +115,19 @@ pub(crate) fn containing_subgraph_id_uncached<'a>(
         .subgraph_bounds
         .iter()
         .filter(|(_, sg)| node_inside_subgraph(bounds, sg))
-        .max_by_key(|(_, sg)| (sg.depth, usize::MAX - (sg.width * sg.height)))
+        .max_by(|(left_id, left), (right_id, right)| {
+            left.depth
+                .cmp(&right.depth)
+                .then_with(|| {
+                    right
+                        .width
+                        .saturating_mul(right.height)
+                        .cmp(&left.width.saturating_mul(left.height))
+                })
+                // Equal-depth, equal-area containers still need stable identity
+                // ordering; HashMap iteration must not select routing policy.
+                .then_with(|| right_id.cmp(left_id))
+        })
         .map(|(id, _)| id.as_str())
 }
 

@@ -6,6 +6,7 @@
 
 mod attachment_resolution;
 mod border_nudging;
+mod checked;
 mod draw_path;
 mod orthogonal;
 mod path_selection;
@@ -17,6 +18,7 @@ mod types;
 pub use self::attachment_resolution::compute_attachment_plan;
 #[cfg(test)]
 use self::attachment_resolution::compute_attachment_plan_from_shared_planner;
+pub use self::checked::repair_and_validate_routes;
 #[cfg(test)]
 pub use self::orthogonal::{build_orthogonal_path, orthogonalize};
 #[cfg(test)]
@@ -513,10 +515,9 @@ pub fn route_all_edges(
 
     // Route self-edges separately using pre-computed loop points
     for se_data in &layout.self_edges {
-        if let Some(edge) = edges
-            .iter()
-            .find(|e| e.from == e.to && e.from == se_data.node_id)
-            && !se_data.points.is_empty()
+        if let Some(edge) = edges.iter().find(|e| {
+            e.index == se_data.edge_index && e.from == e.to && e.stroke != Stroke::Invisible
+        }) && !se_data.points.is_empty()
         {
             routed.push(route_self_edge(se_data, edge, diagram_direction));
         }

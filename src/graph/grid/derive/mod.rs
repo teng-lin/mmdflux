@@ -23,7 +23,7 @@ use override_sublayouts::{
 };
 use quantize::{
     collision_repair, compute_grid_positions, compute_grid_scale_factors, compute_layer_starts,
-    rank_gap_repair,
+    local_label_gap_repair, rank_gap_repair,
 };
 #[cfg(test)]
 use subgraph_bounds::build_children_map;
@@ -341,6 +341,10 @@ pub fn geometry_to_grid_layout_with_routed(
             config.h_spacing
         },
     );
+
+    if config.local_label_spacing {
+        local_label_gap_repair(diagram, &mut draw_positions, &node_dims);
+    }
 
     // Update node_bounds after collision repair
     for (id, &(x, y)) in &draw_positions {
@@ -713,12 +717,18 @@ pub fn geometry_to_grid_layout_with_routed(
         expand_parent_subgraph_bounds(&diagram.subgraphs, &mut subgraph_bounds);
 
         // Compact excessive vertical gaps above top-level override subgraphs.
-        compact_override_subgraph_vertical_gaps(
-            diagram,
-            &mut draw_positions,
-            &mut node_bounds,
-            &mut subgraph_bounds,
-        );
+        // The legacy pass packs to a fixed four-row gap and shifts individual
+        // items across a y threshold. It can erase requested spacing and split
+        // another group across its border. Keep the solved group positions for
+        // explicit terminal spacing instead.
+        if config.layout_spacing.is_none() {
+            compact_override_subgraph_vertical_gaps(
+                diagram,
+                &mut draw_positions,
+                &mut node_bounds,
+                &mut subgraph_bounds,
+            );
+        }
 
         // --- Phase N: Ensure external-edge spacing ---
         ensure_external_edge_spacing(

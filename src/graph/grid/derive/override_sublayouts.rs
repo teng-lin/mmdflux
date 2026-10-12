@@ -59,6 +59,13 @@ pub(super) fn reconcile_sublayouts_draw(
         // For the sub-layout, we use the node dimensions directly and add spacing.
         let sub_dir = sg.dir.unwrap_or(diagram.direction);
         let sub_is_vertical = matches!(sub_dir, Direction::TopDown | Direction::BottomTop);
+        let mut local_config = config.clone();
+        if let Some(spacing) = config.layout_spacing {
+            // The parent axes may differ from this subgraph's authored direction.
+            local_config.h_spacing = GridLayoutConfig::default().h_spacing;
+            local_config.v_spacing = GridLayoutConfig::default().v_spacing;
+            spacing.apply(sub_dir, &mut local_config);
+        }
 
         // Collect sub-layout node draw positions relative to (0,0)
         let mut sub_draw_nodes: Vec<(String, usize, usize, usize, usize)> = Vec::new();
@@ -80,8 +87,8 @@ pub(super) fn reconcile_sublayouts_draw(
             &sub_node_dims,
             sub_rank_sep,
             config.node_sep,
-            config.v_spacing,
-            config.h_spacing,
+            local_config.v_spacing,
+            local_config.h_spacing,
             sub_is_vertical,
             false,
         );
@@ -120,7 +127,15 @@ pub(super) fn reconcile_sublayouts_draw(
         // to position 0 via saturating_sub, collapsing the gap to its neighbor.
         // Push only the affected nodes apart by the minimum amount needed for
         // edge rendering (2 chars: stem + arrowhead).
-        let min_gap = 2;
+        let min_gap = if config.layout_spacing.is_some() {
+            if sub_is_vertical {
+                local_config.v_spacing
+            } else {
+                local_config.h_spacing
+            }
+        } else {
+            2
+        };
         if !sub_is_vertical {
             sub_draw_nodes.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0))); // sort by x, then node_id
             for i in 1..sub_draw_nodes.len() {

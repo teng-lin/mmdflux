@@ -64,6 +64,60 @@ fn test_node_bounds(x: usize, y: usize, width: usize, height: usize) -> NodeBoun
     }
 }
 
+#[test]
+fn local_label_clearance_does_not_push_an_unrelated_connection() {
+    for direction in [Direction::LeftRight, Direction::RightLeft] {
+        let mut graph = Graph::new(direction);
+        for id in ["A", "B", "C", "D"] {
+            graph.add_node(Node::new(id));
+        }
+        graph.add_edge(Edge::new("A", "B"));
+        graph.add_edge(Edge::new("C", "D").with_label("a much longer label"));
+        let mut positions: HashMap<String, (usize, usize)> = HashMap::from([
+            ("A".into(), (0, 0)),
+            ("B".into(), (14, 0)),
+            ("C".into(), (0, 20)),
+            ("D".into(), (14, 20)),
+        ]);
+        let dims = positions.keys().map(|id| (id.clone(), (10, 3))).collect();
+        local_label_gap_repair(&graph, &mut positions, &dims);
+        assert_eq!(
+            positions["B"].0, 14,
+            "unrelated edge must retain its small gap"
+        );
+        assert_eq!(positions["D"].0, 10 + "a much longer label".len() + 4);
+    }
+}
+
+#[test]
+fn rank_gap_repair_skips_empty_dummy_layers_and_only_repairs_real_gaps() {
+    let layers = vec![
+        vec![],
+        vec!["A".into()],
+        vec![],
+        vec![],
+        vec!["B".into()],
+        vec![],
+    ];
+    let dims = HashMap::from([("A".into(), (10, 10)), ("B".into(), (10, 10))]);
+    for vertical in [false, true] {
+        for second in [100, 114, 150] {
+            let position = |primary| {
+                if vertical {
+                    (20, primary)
+                } else {
+                    (primary, 20)
+                }
+            };
+            let mut positions =
+                HashMap::from([("A".into(), position(100)), ("B".into(), position(second))]);
+            rank_gap_repair(&layers, &mut positions, &dims, vertical, 4);
+            assert_eq!(positions["A"], position(100));
+            assert_eq!(positions["B"], position(second.max(114)));
+        }
+    }
+}
+
 fn segment_intersects_node(a: (usize, usize), b: (usize, usize), bounds: &NodeBounds) -> bool {
     let left = bounds.x;
     let right = bounds.x + bounds.width.saturating_sub(1);

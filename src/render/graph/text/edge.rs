@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::format::{char_display_width, display_width};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::format::display_width;
 use crate::graph::geometry::RoutedGraphGeometry;
 use crate::graph::grid::{AttachDirection, GridLayout, Point, RoutedEdge, Segment, SubgraphBounds};
 use crate::graph::{Arrow, Direction, Edge, Stroke, Subgraph};
@@ -926,11 +928,15 @@ fn draw_arrow_with_entry(
     arrow_type: Arrow,
     edge_color: Option<(u8, u8, u8)>,
 ) {
+    if arrow_type == Arrow::None {
+        return;
+    }
     // Protect node content from being overwritten by arrows
     if canvas
         .get(point.x, point.y)
         .is_some_and(|cell| cell.is_node)
     {
+        canvas.note_suppressed_text();
         return;
     }
 
@@ -978,7 +984,10 @@ fn draw_arrow_with_entry(
     };
 
     if canvas.set(ax, ay, arrow_char) {
+        canvas.expect_text(ax, ay, arrow_char.encode_utf8(&mut [0; 4]));
         merge_edge_fg(canvas, ax, ay, edge_color);
+    } else {
+        canvas.note_suppressed_text();
     }
 }
 
@@ -1102,6 +1111,9 @@ pub fn render_all_edges_with_labels(
         };
         let label = effective.as_ref();
         let Some(rt) = render_time_placements.get(&routed.edge.index).copied() else {
+            if !label.trim().is_empty() {
+                canvas.note_suppressed_text();
+            }
             continue;
         };
         let base_x = rt.center.0.saturating_sub(rt.label_dims.0 / 2);
@@ -1180,9 +1192,8 @@ fn write_label_block(
         let line_width = display_width(line);
         let line_x = x + (block_width.saturating_sub(line_width) / 2);
         let mut cell_offset = 0usize;
-        let mut buf = [0u8; 4];
-        for ch in line.chars() {
-            let w = char_display_width(ch);
+        for grapheme in line.graphemes(true) {
+            let w = display_width(grapheme);
             let cell_x = line_x + cell_offset;
             let blocked = (0..w).any(|d| {
                 blocked_points
@@ -1196,8 +1207,12 @@ fn write_label_block(
                     })
                 });
                 if can_write {
-                    canvas.write_str(cell_x, row_y, ch.encode_utf8(&mut buf));
+                    canvas.write_str(cell_x, row_y, grapheme);
+                } else if !grapheme.trim().is_empty() {
+                    canvas.note_suppressed_text();
                 }
+            } else if !grapheme.trim().is_empty() {
+                canvas.note_suppressed_text();
             }
             cell_offset += w;
         }

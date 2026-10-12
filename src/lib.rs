@@ -341,12 +341,16 @@ pub use engines::graph::AlgorithmId;
 pub use engines::graph::EngineAlgorithmId;
 /// Engine identifier (e.g., `Flux`, `Mermaid`, `Elk`).
 pub use engines::graph::EngineId;
-pub use errors::RenderError;
+pub use errors::{RenderError, TextDiagramError};
 /// Policy for resolving `--color auto` in CLI/Wasm adapters.
 pub use format::ColorWhen;
 pub use format::OutputFormat;
 /// Text output color mode (plain, styled, or ANSI).
 pub use format::TextColorMode;
+pub use graph::text_view::{
+    TextAccounting, TextCatalogEntry, TextCellRect, TextDirectionPolicy, TextEdge, TextFocus,
+    TextObjectId, TextTraversalDirection, TextView,
+};
 pub use runtime::config::{GraphTextStyleConfig, RenderConfig, SvgThemeConfig, SvgThemeMode};
 /// Layout configuration for the Sugiyama hierarchical engine.
 pub use runtime::config::{
@@ -373,6 +377,10 @@ pub use runtime::materialize_diagram;
 pub use runtime::render_diagram;
 /// Render a parsed graph-family MMDS document.
 pub use runtime::render_document;
+pub use runtime::text::{
+    PreparedTextDiagram, TextCapabilities, TextDiagram, TextEffectiveHints, TextLimits, TextObject,
+    TextRequest, prepare_text_diagram, render_prepared_text,
+};
 /// Validate input and return structured JSON diagnostics.
 pub use runtime::validate_diagram;
 
